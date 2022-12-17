@@ -12,6 +12,7 @@
 #include <iostream>
 #include <algorithm>
 #include <chrono>
+#include <iomanip>
 
 auto ExtractMapInfos(std::string const& path)
 {
@@ -128,8 +129,35 @@ auto ExtractMapInfos(std::string const& path)
     return values;
 }
 
+#ifdef _WIN32
+#include <Windows.h>
+#endif
+
+#ifdef _WIN32
+inline HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+inline CONSOLE_SCREEN_BUFFER_INFO screenInfo{};
+#endif
+static const auto progressBar = [&](std::size_t current, std::size_t max, std::size_t length) {
+    const float pct = (current * 0.01f) / (max * 0.01f);
+    std::size_t progress = pct * length;
+    if (progress > length)
+        progress = length;
+#ifdef _WIN32
+    GetConsoleScreenBufferInfo(hConsole, &screenInfo);
+    SetConsoleTextAttribute(hConsole, BACKGROUND_BLUE | BACKGROUND_INTENSITY);
+    std::cout << std::string(progress, ' ');
+    SetConsoleTextAttribute(hConsole, screenInfo.wAttributes);
+    std::cout << std::string(length - progress, ' ');
+#else
+    std::cout << ("\033[3;104;30m" + std::string(progress, ' ') + "\033[0m");
+#endif
+    const auto progressText = std::format(" {:3}% ({}/{})", (int)(pct * 100.0f), current, max);
+    std::cout << progressText;
+    return length + progressText.length();
+};
+
 int main(int argc, char* argv[])
-{
+{  
     if (argc < 2)
     {
         std::cout << "USAGE: ./mapconverter <input_folder>" << std::endl;
@@ -138,6 +166,12 @@ int main(int argc, char* argv[])
 
     const auto inputPath = std::filesystem::path(argv[1]);
     const auto outputFolder = inputPath / "output";
+
+    if (!std::filesystem::is_directory(inputPath))
+    {
+        std::cout << std::quoted(inputPath.string()) << " is not a directory" << std::endl;
+        return 1;
+    }
 
     if (!std::filesystem::exists(outputFolder) || !std::filesystem::is_directory(outputFolder))
     {
@@ -152,13 +186,14 @@ int main(int argc, char* argv[])
         return std::filesystem::is_regular_file(entry) && entry.path().has_extension() && !entry.path().extension().compare(".swf");
     });
 
-    std::cout << "--------------------------" << std::endl;
-    std::cout << "Found " << std::setw(4) << nFiles << " files to export" << std::endl;
-    std::cout << "--------------------------" << std::endl;
+    std::cout << "------------------------------" << std::endl;
+    std::cout << "Found " << std::setw(4) << nFiles << " SWF files to export" << std::endl;
+    std::cout << "------------------------------\n" << std::endl;
 
     unsigned int errors = 0;
 
     auto startTime = std::chrono::high_resolution_clock::now();
+    std::size_t i = 0;
 
     for (const auto& path : std::filesystem::directory_iterator(inputPath))
     {
@@ -166,48 +201,64 @@ int main(int argc, char* argv[])
             continue;
 
         const auto extension = path.path().extension();
-        const auto mapInfos = ExtractMapInfos(path.path().string());
         const auto outFile = outputFolder / path.path().filename().replace_extension(".json");
 
-        if (std::ofstream jsonFile(outFile.string(), std::ios::out); jsonFile)
+        try
         {
-            try
+            const auto mapInfos = ExtractMapInfos(path.path().string());
+
+            const auto json = std::format(R"({{"id":{},"width":{},"height":{},"bOutdoor":{},"capabilities":{},"backgroundNum":{},"ambianceId":{},"musicId":{},"mapData":"{}","canAggro":{},"canUseObject":{},"canChangeCharac":{}}})",
+                std::get<uint32_t>(mapInfos.at("id")),
+                std::get<uint32_t>(mapInfos.at("width")),
+                std::get<uint32_t>(mapInfos.at("height")),
+                std::get<bool>(mapInfos.at("bOutdoor")),
+                std::get<uint32_t>(mapInfos.at("capabilities")),
+                std::get<uint32_t>(mapInfos.at("backgroundNum")),
+                std::get<uint32_t>(mapInfos.at("ambianceId")),
+                std::get<uint32_t>(mapInfos.at("musicId")),
+                std::get<std::string>(mapInfos.at("mapData")).data(),
+                std::get<bool>(mapInfos.at("canAggro")),
+                std::get<bool>(mapInfos.at("canUseObject")),
+                std::get<bool>(mapInfos.at("canChangeCharac")));
+
+            if (std::ofstream jsonFile(outFile.string(), std::ios::out); jsonFile)
             {
-                auto json = std::format(R"({{"id":{},"width":{},"height":{},"bOutdoor":{},"capabilities":{},"backgroundNum":{},"ambianceId":{},"musicId":{},"mapData":"{}","canAggro":{},"canUseObject":{},"canChangeCharac":{}}})",
-                    std::get<uint32_t>(mapInfos.at("id")),
-                    std::get<uint32_t>(mapInfos.at("width")),
-                    std::get<uint32_t>(mapInfos.at("height")),
-                    std::get<bool>(mapInfos.at("bOutdoor")),
-                    std::get<uint32_t>(mapInfos.at("capabilities")),
-                    std::get<uint32_t>(mapInfos.at("backgroundNum")),
-                    std::get<uint32_t>(mapInfos.at("ambianceId")),
-                    std::get<uint32_t>(mapInfos.at("musicId")),
-                    std::get<std::string>(mapInfos.at("mapData")).data(),
-                    std::get<bool>(mapInfos.at("canAggro")),
-                    std::get<bool>(mapInfos.at("canUseObject")),
-                    std::get<bool>(mapInfos.at("canChangeCharac")));
-
                 jsonFile << json;
-
                 jsonFile.close();
             }
-            catch (std::exception& ex)
+            else
             {
                 errors++;
-                std::cout << "[ERROR] " << ex.what() << std::endl;
+                std::cout << "Could not open file " << std::quoted(outFile.string()) << " for writing" << std::endl;
             }
         }
-        else
+        catch (std::exception& ex)
         {
             errors++;
-            std::cout << "Could not open file '" << outFile.string() << "' for writing" << std::endl;
-        }
+
+            static auto date = std::chrono::system_clock::now();
+            if (std::ofstream errLog(std::format("errors_{:%F}.txt", date), std::ofstream::out | std::ofstream::app); errLog)
+            {
+                errLog << "[ERROR] File: " << outFile.filename().string() << ": " << std::quoted(ex.what()) << std::endl;
+                errLog.close();
+            }
+        }  
+
+        auto len = progressBar(++i, nFiles, 30);
+
+        if (i < nFiles)
+            std::cout << std::string(len, '\b');
     }
 
     auto endTime = std::chrono::high_resolution_clock::now();
     auto duration = (endTime - startTime);
 
-    std::cout << "Task completed in " << std::format("{0:%T}", duration) << " with " << errors << " errors." << std::endl;
+    std::cout << "\n\nTask completed in " << std::format("{0:%T}", duration) << " with " << errors << " errors." << std::endl;
+
+    if (errors)
+    {
+        std::cout << "\nCheck errors logs for more details" << std::endl;
+    }
 
     return 0;
 }
